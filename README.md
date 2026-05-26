@@ -1,4 +1,4 @@
-# terjangkau
+# terjangkau : Neighborhood Explorer
 Discover, categorize, and measure the distance to neighborhood facilities and point of interest within a one-kilometer radius of any clicked map coordinate. Powered by OpenStreetMap data.
 
 <img width="1359" height="698" alt="image" src="https://github.com/user-attachments/assets/84dafedc-49de-4ec9-985e-4c1cfa9696da" />
