@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terjangkau : Neighborhood Explorer</title>
+    <link rel="icon" href="https://static.miraheze.org/pustakawiki/4/42/Logo_pustaka.png">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; background: #ecf0f1; }
+        #app-container { display: flex; flex: 1; overflow: hidden; }
+        @media (max-width: 768px) { #app-container { flex-direction: column; } }
+        
+        #sidebar { width: 380px; padding: 1rem; background: #fff; overflow-y: auto; box-shadow: 2px 0 10px rgba(0,0,0,0.1); z-index: 1000; display: flex; flex-direction: column; }
+        @media (max-width: 768px) { #sidebar { width: 100%; height: 45%; box-sizing: border-box; } }
+        
+        .app-title { margin: 0 0 15px 0; font-size: 1.2rem; color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        .instruction-text { font-size: 0.9rem; color: #34495e; padding: 10px; background: #e8ecf1; border-radius: 4px; border-left: 4px solid #3498db; margin-bottom: 15px;}
+        
+        #map { flex: 1; width: 100%; cursor: crosshair; }
+        #map.locked { cursor: default; }
+        
+        button#toggle-cat-btn { width: 100%; padding: 10px; background: #34495e; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-bottom: 15px; display: none; transition: background 0.2s; }
+        button#toggle-cat-btn:hover { background: #2c3e50; }
+        
+        #poi-list-container { flex: 1; overflow-y: auto; border-top: 1px solid #ddd; padding-top: 10px; }
+        .poi-category { font-size: 1rem; color: #2c3e50; margin-top: 15px; margin-bottom: 8px; text-transform: capitalize; border-bottom: 2px solid #bdc3c7; display: inline-block; font-weight: bold; }
+        .poi-item { font-size: 0.9rem; padding: 8px; margin-bottom: 6px; background: #f8f9fa; border: 1px solid #ecf0f1; border-radius: 4px; cursor: pointer; transition: all 0.2s; display: flex; justify-content: space-between; align-items: center; }
+        .poi-item:hover { background: #e8f4f8; border-color: #3498db; transform: translateX(2px); }
+        .poi-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 75%; font-weight: 500; }
+        .poi-distance { font-size: 0.8rem; color: #7f8c8d; background: #eee; padding: 2px 6px; border-radius: 10px; }
+        
+        .loader { display: none; text-align: center; margin: 15px 0; color: #3498db; font-weight: bold; }
+        .summary-stats { font-weight: bold; color: #27ae60; margin-bottom: 10px; font-size: 1.1rem; }
+        
+        .custom-marker { background: white; border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 5px rgba(0,0,0,0.4); font-size: 14px; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+
+<div id="app-container">
+    <div id="sidebar">
+        <h1 class="app-title">Neighborhood Explorer</h1>
+        
+        <div class="instruction-text" id="instructions">
+            <strong>Ready:</strong> Click anywhere on the map to analyze facilities within a 1km radius. Refresh the page to start a new search.
+        </div>
+        
+        <button id="toggle-cat-btn" onclick="toggleCategorization()">Show Flat List (By Distance)</button>
+        
+        <div class="loader" id="loader">Scanning OpenStreetMap...</div>
+        
+        <div id="poi-list-container">
+            <div style="color: #7f8c8d; text-align: center; margin-top: 20px;" id="idle-text">Awaiting map click...</div>
+        </div>
+    </div>
+    
+    <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    const map = L.map('map').setView([0, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19
+    }).addTo(map);
+
+    let currentLayerGroup = L.layerGroup().addTo(map);
+    let searchRadius = 1000; 
+    let currentPoiMarkers = [];
+    let currentPoisList = []; 
+    let isAnalysisLocked = false;
+    let isCategorized = true;
+
+    const emojiMap = {
+        'school': '🏫', 'kindergarten': '🧸', 'university': '🎓', 'college': '🏛️',
+        'hospital': '🏥', 'pharmacy': '💊', 'clinic': '🩺', 'dentist': '🦷',
+        'supermarket': '🛒', 'convenience': '🏪', 'clothes': '👕', 'bakery': '🥖',
+        'park': '🌳', 'pitch': '⚽', 'fitness_centre': '🏋️', 'swimming_pool': '🏊',
+        'library': '📚', 'bank': '🏦', 'place_of_worship': '⛪', 'post_office': '✉️',
+        'cafe': '☕', 'restaurant': '🍽️', 'fast_food': '🍔', 'bar': '🍻', 'pub': '🍺'
+    };
+
+    map.locate({setView: true, maxZoom: 14});
+    map.on('locationerror', function(e) {
+        map.setView([51.505, -0.09], 13); 
+    });
+
+    map.on('click', async function(e) {
+        if (isAnalysisLocked) return;
+        
+        isAnalysisLocked = true;
+        document.getElementById('map').classList.add('locked');
+        document.getElementById('instructions').style.display = 'none';
+        
+        const centerLatLng = e.latlng;
+        const lat = centerLatLng.lat;
+        const lon = centerLatLng.lng;
+        
+        document.getElementById('loader').style.display = 'block';
+        document.getElementById('poi-list-container').innerHTML = '';
+        
+        map.setView(centerLatLng, 15, { animate: true });
+        currentLayerGroup.clearLayers();
+        currentPoiMarkers = [];
+        currentPoisList = [];
+        
+        L.circle(centerLatLng, { radius: searchRadius, color: '#3498db', fillOpacity: 0.1, weight: 2 }).addTo(currentLayerGroup);
+        L.circleMarker(centerLatLng, { radius: 5, color: '#2c3e50', fillColor: '#3498db', fillOpacity: 1 }).bindPopup('<b>Search Center</b>').addTo(currentLayerGroup);
+        
+        await fetchAllFacilities(lat, lon, centerLatLng);
+    });
+
+    function getIconForCategory(category) {
+        const iconSymbol = emojiMap[category] || '📍';
+        return L.divIcon({
+            html: `<div class="custom-marker">${iconSymbol}</div>`,
+            className: '',
+            iconSize: [26, 26],
+            iconAnchor: [13, 13]
+        });
+    }
+
+    async function fetchAllFacilities(lat, lon, centerLatLng) {
+        const overpassQuery = `
+            [out:json][timeout:60];
+            (
+                node["amenity"](around:${searchRadius},${lat},${lon});
+                way["amenity"](around:${searchRadius},${lat},${lon});
+                node["shop"](around:${searchRadius},${lat},${lon});
+                way["shop"](around:${searchRadius},${lat},${lon});
+                node["leisure"](around:${searchRadius},${lat},${lon});
+                way["leisure"](around:${searchRadius},${lat},${lon});
+            );
+            out center;
+        `;
+        
+        try {
+            const response = await fetch('https://overpass-api.de/api/interpreter', {
+                method: 'POST',
+                body: overpassQuery
+            });
+            
+            const data = await response.json();
+
+            data.elements.forEach(el => {
+                const elLat = el.lat || el.center.lat;
+                const elLon = el.lon || el.center.lon;
+                const poiLatLng = L.latLng(elLat, elLon);
+                
+                const name = el.tags.name || 'Unnamed Facility';
+                const distance = Math.round(centerLatLng.distanceTo(poiLatLng));
+                
+                let rawCategory = 'other';
+                if (el.tags.amenity) rawCategory = el.tags.amenity;
+                else if (el.tags.shop) rawCategory = el.tags.shop;
+                else if (el.tags.leisure) rawCategory = el.tags.leisure;
+                
+                const displayCategory = rawCategory.replace(/_/g, ' ');
+                const customIcon = getIconForCategory(rawCategory);
+
+                const marker = L.marker(poiLatLng, { icon: customIcon })
+                    .bindPopup(`<b>${name}</b><br><span style="text-transform:capitalize; color:#7f8c8d;">${displayCategory}</span><br>Distance: ${distance}m<br>${Object.keys(el.tags).map(k => `${k}: ${el.tags[k]}`).slice(0, 3).join('<br>')}`);
+                
+                marker.addTo(currentLayerGroup);
+                const markerIndex = currentPoiMarkers.length;
+                currentPoiMarkers.push(marker);
+                
+                currentPoisList.push({
+                    name: name,
+                    category: displayCategory,
+                    index: markerIndex,
+                    distance: distance
+                });
+            });
+
+            document.getElementById('toggle-cat-btn').style.display = 'block';
+            renderSidebar();
+
+        } catch (error) {
+            document.getElementById('poi-list-container').innerHTML = `<div style="color: #e74c3c; padding: 10px; font-weight: bold;">Error retrieving data: ${error.message}</div>`;
+        } finally {
+            document.getElementById('loader').style.display = 'none';
+        }
+    }
+
+    function toggleCategorization() {
+        isCategorized = !isCategorized;
+        const btn = document.getElementById('toggle-cat-btn');
+        btn.innerText = isCategorized ? 'Show Flat List (By Distance)' : 'Show Categorized List';
+        renderSidebar();
+    }
+
+    function renderSidebar() {
+        const container = document.getElementById('poi-list-container');
+        const totalFound = currentPoisList.length;
+        
+        if (totalFound === 0) {
+            container.innerHTML = '<div style="padding: 10px;">No facilities found within 1km.</div>';
+            return;
+        }
+
+        let htmlString = `<div class="summary-stats">Found ${totalFound} facilities</div>`;
+        
+        if (isCategorized) {
+            const categorizedPois = {};
+            currentPoisList.forEach(poi => {
+                if (!categorizedPois[poi.category]) {
+                    categorizedPois[poi.category] = [];
+                }
+                categorizedPois[poi.category].push(poi);
+            });
+
+            const sortedCategories = Object.keys(categorizedPois).sort();
+            sortedCategories.forEach(category => {
+                htmlString += `<div class="poi-category">${category} (${categorizedPois[category].length})</div>`;
+                
+                categorizedPois[category].sort((a, b) => a.distance - b.distance).forEach(poi => {
+                    htmlString += `
+                        <div class="poi-item" onclick="focusOnPoi(${poi.index})" title="${poi.name}">
+                            <span class="poi-name">${poi.name}</span>
+                            <span class="poi-distance">${poi.distance}m</span>
+                        </div>`;
+                });
+            });
+        } else {
+            htmlString += `<div class="poi-category">All Nearby Facilities</div>`;
+            
+            const flatSortedList = [...currentPoisList].sort((a, b) => a.distance - b.distance);
+            flatSortedList.forEach(poi => {
+                htmlString += `
+                    <div class="poi-item" onclick="focusOnPoi(${poi.index})" title="${poi.name}">
+                        <span class="poi-name">${poi.name} <small style="color:#7f8c8d; font-weight:normal; text-transform:capitalize;">(${poi.category})</small></span>
+                        <span class="poi-distance">${poi.distance}m</span>
+                    </div>`;
+            });
+        }
+        
+        container.innerHTML = htmlString;
+    }
+
+    window.focusOnPoi = function(index) {
+        const targetMarker = currentPoiMarkers[index];
+        if (targetMarker) {
+            const latLng = targetMarker.getLatLng();
+            map.setView(latLng, 18, { animate: true, duration: 0.5 });
+            setTimeout(() => {
+                targetMarker.openPopup();
+            }, 300);
+        }
+    };
+</script>
+</body>
+</html>
